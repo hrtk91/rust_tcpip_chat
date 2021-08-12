@@ -114,6 +114,9 @@ fn main_loop(rx: mpsc::Receiver<ThreadMessage>) {
             Err(e) => panic!("cannot receive thread message: {:?}", e),
         };
         queue.push_back(thread_msg);
+        if queue.len() > 10 {
+            queue.pop_front();
+        };
         println!("{}", termion::clear::All);
         rewrite(&queue);
     }
