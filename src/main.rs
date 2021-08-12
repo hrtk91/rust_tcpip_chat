@@ -14,12 +14,14 @@ struct ThreadMessage {
     content: String,
 }
 
-#[derive(Debug)]
+#[derive(PartialOrd, PartialEq, Debug)]
 enum Category {
     Send,
     Receive,
-    System,
+    Terminate,
 }
+
+const TERMINATE_CODE: &str = "system:terminate";
 
 fn send_main(mut stream: TcpStream, tx: mpsc::Sender<ThreadMessage>) -> JoinHandle<()> {
     thread::spawn(move || {
@@ -32,6 +34,18 @@ fn send_main(mut stream: TcpStream, tx: mpsc::Sender<ThreadMessage>) -> JoinHand
             }
     
             let input = input.replace("\n", "").replace("\r", "");
+            if input == TERMINATE_CODE {
+                stream.shutdown(std::net::Shutdown::Both).unwrap();
+                let thread_message = ThreadMessage {
+                    category: Category::Terminate,
+                    content: String::from(""),
+                };
+                if let Err(e) = tx.send(thread_message) {
+                    panic!("fault send thread message: {:?}", e);
+                }
+                return
+            }
+
             let bytes = input.as_bytes();
             let write_result = stream.write(bytes);
             if let Err(e) = write_result {
@@ -64,8 +78,8 @@ fn receive_main(mut stream: TcpStream, tx: mpsc::Sender<ThreadMessage>) -> JoinH
     
             if size == 0 {
                 let thread_message = ThreadMessage {
-                    category: Category::System,
-                    content: "closed connection".to_string(),
+                    category: Category::Terminate,
+                    content: String::from(""),
                 };
                 if let Err(e) = tx.send(thread_message) {
                     panic!("fault send thread message: {:?}", e);
@@ -100,7 +114,7 @@ fn rewrite(queue: &std::collections::VecDeque<ThreadMessage>) {
             Category::Receive => {
                 println!("partner: {}", thread_msg.content);
             },
-            Category::System => { }
+            _ => { }
         };
     }
 }
@@ -108,11 +122,20 @@ fn rewrite(queue: &std::collections::VecDeque<ThreadMessage>) {
 fn main_loop(rx: mpsc::Receiver<ThreadMessage>) {
     use std::collections::VecDeque;
     let mut queue: VecDeque<ThreadMessage> = std::collections::VecDeque::new();
+    println!("{}", termion::clear::All);
     loop {
         let thread_msg = match rx.recv() {
-            Ok(msg) => msg,
+            Ok(msg) => match msg.category {
+                Category::Terminate => {
+                    println!("connection terminated");
+                    println!("program shutdown");
+                    return
+                },
+                _ => msg,
+            },
             Err(e) => panic!("cannot receive thread message: {:?}", e),
         };
+
         queue.push_back(thread_msg);
         if queue.len() > 10 {
             queue.pop_front();
@@ -160,12 +183,18 @@ fn main() {
         let mut input = String::new();
         let destination = match std::io::stdin().read_line(&mut input) {
             Ok(_) => input.trim(),
-            Err(e) => panic!("cannot connection: {:?}", e),
+            Err(e) => {
+                println!("cannot connection: {:?}", e);
+                return
+            },
         };
 
         match TcpStream::connect(destination) {
             Ok(tcpstream) => tcpstream,
-            Err(e) => panic!("failed connection: {:?}", e),
+            Err(e) => {
+                println!("failed connection: {:?}", e);
+                return
+            },
         }
     };
 
