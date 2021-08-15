@@ -1,45 +1,117 @@
-use std::net::TcpStream;
-use std::sync::mpsc;
+mod rudecha;
+use std::thread;
+use std::thread::JoinHandle;
+use std::sync::mpsc::Sender;
+use std::collections::VecDeque;
 
-mod ruscha;
+enum Category {
+    Send,
+    Recv,
+}
 
-fn rewrite(queue: &std::collections::VecDeque<ruscha::ThreadMessage>) {
+struct Message {
+    category: Category,
+    content: String, 
+}
+
+fn rewrite(queue: &VecDeque<Message>) {
     for thread_msg in queue.iter() {
         match thread_msg.category {
-            ruscha::Category::Send => {
+            Category::Send => {
                 println!("me: {}", thread_msg.content);
             },
-            ruscha::Category::Receive => {
+            Category::Recv => {
                 println!("partner: {}", thread_msg.content);
-            },
-            _ => { }
+            }
         };
     }
 }
 
-fn main_loop(rx: mpsc::Receiver<ruscha::ThreadMessage>) {
-    use std::collections::VecDeque;
-    let mut queue: VecDeque<ruscha::ThreadMessage> = std::collections::VecDeque::new();
+fn update_console(queue: &mut VecDeque<Message>, msg: Message) {
+    queue.push_back(msg);
+
+    if queue.len() > 10 {
+        queue.pop_front();
+    }
+                    
     println!("{}", termion::clear::All);
+    rewrite(&queue);
+}
+
+fn read_connection_info() -> (String, String) {
+    println!("host:");
+    let mut input = String::new();
+    let host = match std::io::stdin().read_line(&mut input) {
+        Ok(_) => input.trim().to_string(),
+        Err(e) => panic!("input failed: {:?}", e),
+    };
+
+    println!("port:");
+    let mut input = String::new();
+    let port = match std::io::stdin().read_line(&mut input) {
+        Ok(_) => input.trim().to_string(),
+        Err(e) => panic!("input failed: {:?}", e),
+    };
+
+    (host, port)
+}
+
+fn read_user_input_loop(tx: Sender<String>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        let stdin = std::io::stdin();
+        loop {
+            let mut buf = String::new();
+            let user_input = match stdin.read_line(&mut buf) {
+                Ok(_) => buf.trim(),
+                Err(_) => continue,
+            };
+    
+            tx.send(user_input.to_string()).unwrap();
+    
+            if let ":q" = user_input {
+                return
+            }
+        }
+    })
+}
+
+fn main_loop(mut rudecha: rudecha::RuDeCha) {
+    let mut queue: VecDeque<Message> = VecDeque::new();
+    println!("{}", termion::clear::All);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let input_handle = read_user_input_loop(tx);
+
+    rudecha.start().unwrap();
+
     loop {
-        let thread_msg = match rx.recv() {
-            Ok(msg) => match msg.category {
-                ruscha::Category::Terminate => {
-                    println!("connection terminated");
-                    println!("program shutdown");
-                    return
-                },
-                _ => msg,
+        if let Ok(user_input) = rx.try_recv() {
+            if user_input == ":q" {
+                rudecha.shutdown().unwrap();
+                input_handle.join().unwrap();
+                return
+            } else {
+                rudecha.send(user_input.to_string());
+                update_console(&mut queue, Message {
+                    category: Category::Send,
+                    content: user_input.to_string(),
+                });
+            }
+        }
+
+        let msg = match rudecha.recv() {
+            Ok(msg) => msg,
+            Err(e) if e == rudecha::RecvErr::Terminate => {
+                println!("connection closed");
+                println!("program shutdown");
+                return
             },
-            Err(e) => panic!("cannot receive thread message: {:?}", e),
+            Err(_) /* if e == rudecha::RecvErr::Empty */ => continue,
         };
 
-        queue.push_back(thread_msg);
-        if queue.len() > 10 {
-            queue.pop_front();
-        };
-        println!("{}", termion::clear::All);
-        rewrite(&queue);
+        update_console(&mut queue, Message {
+            category: Category::Recv,
+            content: msg,
+        });
     }
 }
 
@@ -57,31 +129,20 @@ fn main() {
         }
     };
 
-    let stream: TcpStream = match input.as_str() {
+    let rudecha: rudecha::RuDeCha = match input.as_str() {
         "connect" => {
-            println!("host:");
-            let mut input = String::new();
-            let host = match std::io::stdin().read_line(&mut input) {
-                Ok(_) => input.trim().to_string(),
-                Err(e) => panic!("input failed: {:?}", e),
-            };
-
-            println!("port:");
-            let mut input = String::new();
-            let port = match std::io::stdin().read_line(&mut input) {
-                Ok(_) => input.trim().to_string(),
-                Err(e) => panic!("input failed: {:?}", e),
-            };
-
-            ruscha::connect(host, port).unwrap()
+            let (host, port) = read_connection_info();
+            rudecha::RuDeCha::connect(&host, &port).unwrap()
         },
         "accept" => {
-            ruscha::listen(ruscha::HOST.to_string(), ruscha::PORT).unwrap().0
+            let (host, port) = read_connection_info();
+            match rudecha::RuDeCha::listen(&host, &port) {
+                Ok(rudecha) => rudecha,
+                Err(e) => panic!("{:?}", e),
+            }
         },
         _ => return println!("input error"),
     };
 
-    let (rx, _receive_handle, _send_handle) = ruscha::start(stream);
-
-    main_loop(rx);
+    main_loop(rudecha);
 }
